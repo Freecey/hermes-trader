@@ -761,7 +761,10 @@ def close_position_market(coin: str) -> Dict[str, Any]:
         try:
             from hermes_trader.session_log import append as _log_event
             _log_event({"event": "error", "scope": "partial_close",
-                        "coin": coin, "filled_sz": total_filled,
+                        "coin": coin,
+                        "error": (f"partial close: {total_filled:g} of "
+                                  f"{requested:g} filled, retrying next tick"),
+                        "filled_sz": total_filled,
                         "remaining_sz": remaining})
         except Exception:
             pass
