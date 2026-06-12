@@ -225,3 +225,55 @@ def test_operator_mode_endpoint_accepts_paper(monkeypatch, tmp_path):
     bad = client.post("/api/dashboard/operator/mode", json={"mode": "YOLO"},
                       headers={"X-Operator-Token": "test-token"})
     assert bad.status_code == 400
+
+
+# ── cross-process consistency (loop + dashboard server share the file) ──
+
+def test_load_rereads_file_changed_by_another_process(tmp_path):
+    """A second process's write must be visible despite the in-memory cache."""
+    import json, os
+    paper_engine.place_order(True, 0.1, 100_000.0, "BTC")
+    path = os.environ["HERMES_PAPER_STATE_FILE"]
+
+    # Simulate another process closing the position and writing the file.
+    other = json.load(open(path))
+    other["positions"] = {}
+    other["cash"] = 10_500.0
+    with open(path, "w") as f:
+        json.dump(other, f)
+    # Bump mtime beyond ns-resolution ambiguity.
+    st_info = os.stat(path)
+    os.utime(path, ns=(st_info.st_atime_ns, st_info.st_mtime_ns + 1_000_000))
+
+    st = paper_engine._load()
+    assert st["positions"] == {}          # external close visible, not clobbered
+    assert st["cash"] == pytest.approx(10_500.0)
+
+
+def test_trigger_not_double_fired_after_external_state_change(tmp_path):
+    """If another process already fired a trigger (file updated), our stale
+    cache must not fire it again."""
+    import json, os
+    paper_engine.place_order(True, 0.1, 100_000.0, "BTC")
+    paper_engine.place_trigger_order(True, 0.1, 97_500.0, "sl", "BTC")
+    path = os.environ["HERMES_PAPER_STATE_FILE"]
+
+    # "Other process" fires the trigger: position closed, trigger gone.
+    other = json.load(open(path))
+    other["positions"] = {}
+    other["triggers"] = []
+    other["realized_pnl"] = -250.0
+    with open(path, "w") as f:
+        json.dump(other, f)
+    st_info = os.stat(path)
+    os.utime(path, ns=(st_info.st_atime_ns, st_info.st_mtime_ns + 1_000_000))
+
+    MIDS["BTC"] = 97_000.0  # below the stop — would re-fire on stale state
+    try:
+        state = paper_engine.account_state()
+    finally:
+        MIDS["BTC"] = 100_000.0
+    assert state["asset_positions"] == []
+    st = paper_engine._load()
+    assert st["realized_pnl"] == pytest.approx(-250.0)  # fired ONCE, elsewhere
+    assert not any(f["kind"] == "trigger_sl" for f in st["fills"])

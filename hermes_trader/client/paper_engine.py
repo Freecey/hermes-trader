@@ -36,13 +36,20 @@ import logging
 import os
 import threading
 import time
+from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
+
+try:
+    import fcntl  # POSIX only — Windows degrades to in-process locking
+except ImportError:  # pragma: no cover
+    fcntl = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _LOCK = threading.RLock()
 _state: Optional[Dict[str, Any]] = None
+_state_mtime_ns: Optional[int] = None
 
 _MAX_FILLS_KEPT = 300
 
@@ -81,20 +88,36 @@ def _fresh_state() -> Dict[str, Any]:
 
 
 def _load() -> Dict[str, Any]:
-    global _state
+    """Return the book, re-reading the state file whenever it changed on disk.
+
+    The trading loop and the dashboard server are SEPARATE PROCESSES sharing
+    this file — a naive in-memory cache would let one process clobber the
+    other's writes (e.g. an operator close from the server lost under the
+    loop's next fill). The mtime check keeps the cache while the file is
+    untouched and reloads the instant another process wrote it.
+    """
+    global _state, _state_mtime_ns
     with _LOCK:
-        if _state is not None:
+        path = _state_path()
+        try:
+            mtime_ns = os.stat(path).st_mtime_ns
+        except OSError:
+            mtime_ns = None
+        if _state is not None and mtime_ns == _state_mtime_ns:
             return _state
         try:
-            with open(_state_path(), "r") as f:
+            with open(path, "r") as f:
                 _state = json.load(f)
+            _state_mtime_ns = mtime_ns
         except (FileNotFoundError, json.JSONDecodeError):
-            _state = _fresh_state()
-            logger.info(f"[paper] fresh book: ${_state['cash']:.2f} starting equity")
+            if _state is None:
+                _state = _fresh_state()
+                logger.info(f"[paper] fresh book: ${_state['cash']:.2f} starting equity")
         return _state
 
 
 def _save() -> None:
+    global _state_mtime_ns
     with _LOCK:
         if _state is None:
             return
@@ -102,12 +125,38 @@ def _save() -> None:
         with open(tmp, "w") as f:
             json.dump(_state, f, indent=2)
         os.replace(tmp, _state_path())
+        try:
+            _state_mtime_ns = os.stat(_state_path()).st_mtime_ns
+        except OSError:  # pragma: no cover
+            _state_mtime_ns = None
+
+
+@contextmanager
+def _book_lock():
+    """Serialize read-modify-write cycles ACROSS PROCESSES (loop + server).
+
+    flock on a sidecar .lock file; combined with the mtime-aware _load(),
+    every mutation sees the freshest book and two processes can't both fire
+    the same virtual trigger or interleave fills. In-process reentrancy is
+    covered by _LOCK; platforms without fcntl degrade to in-process locking.
+    """
+    with _LOCK:
+        if fcntl is None:  # pragma: no cover
+            yield
+            return
+        lock_file = open(_state_path() + ".lock", "w")
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+            lock_file.close()
 
 
 def reset_book() -> Dict[str, Any]:
     """Wipe the paper book back to starting equity (operator/testing helper)."""
     global _state
-    with _LOCK:
+    with _book_lock():
         _state = _fresh_state()
         _save()
         return dict(_state)
@@ -228,7 +277,7 @@ def place_order(is_buy: bool, size: float, mid_price: float, coin: str,
         return {"ok": False, "error": f"invalid price for {coin}"}
     px = _fill_px(coin, is_buy, mid)
 
-    with _LOCK:
+    with _book_lock():
         st = _load()
         pos = st["positions"].get(coin)
         szi = float(pos["szi"]) if pos else 0.0
@@ -266,7 +315,7 @@ def place_trigger_order(is_long_position: bool, size: float, trigger_px: float,
     """Paper mirror of exchange.place_hl_trigger_order — virtual resting order."""
     if size <= 0 or trigger_px <= 0:
         return {"ok": False, "error": "invalid size/price"}
-    with _LOCK:
+    with _book_lock():
         st = _load()
         oid = st["next_oid"]
         st["next_oid"] += 1
@@ -279,7 +328,7 @@ def place_trigger_order(is_long_position: bool, size: float, trigger_px: float,
 
 
 def set_leverage(coin: str, leverage: int) -> Dict[str, Any]:
-    with _LOCK:
+    with _book_lock():
         st = _load()
         st["leverage"][coin] = int(leverage)
         _save()
@@ -287,7 +336,7 @@ def set_leverage(coin: str, leverage: int) -> Dict[str, Any]:
 
 
 def cancel_order(oid: int) -> Dict[str, Any]:
-    with _LOCK:
+    with _book_lock():
         st = _load()
         before = len(st["triggers"])
         st["triggers"] = [t for t in st["triggers"] if int(t["oid"]) != int(oid)]
@@ -298,7 +347,7 @@ def cancel_order(oid: int) -> Dict[str, Any]:
 
 
 def cancel_open_orders_for_coin(coin: str) -> int:
-    with _LOCK:
+    with _book_lock():
         st = _load()
         before = len(st["triggers"])
         st["triggers"] = [t for t in st["triggers"] if t["coin"] != coin]
@@ -311,14 +360,19 @@ def cancel_open_orders_for_coin(coin: str) -> int:
 
 # ── Trigger evaluation + account state ─────────────────────────────────────────
 
-def _check_triggers(st: Dict[str, Any], mids: Dict[str, float]) -> None:
-    """Fire virtual SL/TP triggers crossed by the live mid (reduce-only)."""
+def _check_triggers(st: Dict[str, Any], mids: Dict[str, float]) -> int:
+    """Fire virtual SL/TP triggers crossed by the live mid (reduce-only).
+
+    Returns the number of book mutations (fires + orphan-trigger removals)
+    so the caller only persists when something actually changed."""
     slip = float(_cfg().get("paper_slippage_bps", 2)) / 10_000.0
+    mutations = 0
     fired: List[Dict[str, Any]] = []
     for t in list(st["triggers"]):
         pos = st["positions"].get(t["coin"])
         if not pos:
             st["triggers"].remove(t)
+            mutations += 1
             continue
         mid = mids.get(t["coin"])
         if not mid or mid <= 0:
@@ -346,8 +400,10 @@ def _check_triggers(st: Dict[str, Any], mids: Dict[str, float]) -> None:
         realized = _apply_fill(st, t["coin"], delta, px, kind=f"trigger_{t['kind']}")
         if t in st["triggers"]:
             st["triggers"].remove(t)
+        mutations += 1
         logger.info(f"[paper] TRIGGER {t['kind'].upper()} fired {t['coin']} "
                     f"@ {px:.6g} (realized {realized:+.2f})")
+    return mutations
 
 
 def account_state(include_hip3: bool = False) -> Dict[str, Any]:
@@ -362,10 +418,14 @@ def account_state(include_hip3: bool = False) -> Dict[str, Any]:
         logger.warning(f"[paper] mids fetch failed, marking at entry: {e}")
         mids = {}
 
-    with _LOCK:
+    # _book_lock + mtime-aware _load: triggers are evaluated on the freshest
+    # book and persisted only when one fired — the loop and the dashboard
+    # server (separate processes) can't double-fire the same trigger or
+    # clobber each other's writes with a stale cache.
+    with _book_lock():
         st = _load()
-        _check_triggers(st, mids)
-        _save()
+        if _check_triggers(st, mids):
+            _save()
 
         upnl = 0.0
         total_ntl = 0.0

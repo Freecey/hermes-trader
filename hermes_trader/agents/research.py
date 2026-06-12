@@ -358,7 +358,7 @@ def _llm_max_tokens() -> int:
         return 512
 
 
-_anthropic_client_instance = None
+_anthropic_clients: Dict[tuple, Any] = {}
 
 
 def _anthropic_client(api_key: str):
@@ -367,12 +367,16 @@ def _anthropic_client(api_key: str):
     The SDK natively honors ANTHROPIC_BASE_URL, so this branch also reaches
     Anthropic-API-compatible providers (e.g. MiniMax at
     https://api.minimax.io/anthropic with HERMES_LLM_MODEL=MiniMax-M3).
+    Cached per (key, base_url) so a rotated key or base-URL change in a
+    long-running daemon picks up a fresh client instead of a stale one.
     """
-    global _anthropic_client_instance
-    if _anthropic_client_instance is None:
+    cache_key = (api_key, os.environ.get("ANTHROPIC_BASE_URL", ""))
+    client = _anthropic_clients.get(cache_key)
+    if client is None:
         import anthropic
-        _anthropic_client_instance = anthropic.Anthropic(api_key=api_key)
-    return _anthropic_client_instance
+        client = anthropic.Anthropic(api_key=api_key)
+        _anthropic_clients[cache_key] = client
+    return client
 
 
 def _call_anthropic(api_key: str, model: str, system_prompt: str,
@@ -466,7 +470,9 @@ async def _async_do_call(
                 # DeepSeek-R1 style) inline chain-of-thought as <think>...
                 # </think> ahead of the answer. Strip it: parse_verdict's
                 # JSON-on-last-line contract breaks if thinking is left in.
-                return re.sub(r"<think>.*?</think>", "", content,
+                # \Z alternative: a truncated response can leave the tag
+                # unclosed — strip to end-of-string rather than leaking it.
+                return re.sub(r"<think>.*?(?:</think>|\Z)", "", content,
                               flags=re.DOTALL).strip()
             logger.error("[research] LLM returned 200 but no choices — empty response")
             return ""

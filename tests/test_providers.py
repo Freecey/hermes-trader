@@ -16,7 +16,7 @@ def _clean_env(monkeypatch):
                 "GEMINI_API_KEY", "MINIMAX_API_KEY", "ANTHROPIC_API_KEY",
                 "ANTHROPIC_MODEL"):
         monkeypatch.delenv(var, raising=False)
-    monkeypatch.setattr(research, "_anthropic_client_instance", None)
+    monkeypatch.setattr(research, "_anthropic_clients", {})
     yield
 
 
@@ -158,3 +158,14 @@ def test_thinking_off_by_default(monkeypatch):
     research._call_ai("s", "u")
     assert "thinking" not in captured
     assert captured["max_tokens"] == 512
+
+
+def test_unclosed_think_tag_is_stripped(monkeypatch):
+    """A truncated reasoning response must not leak <think> into the verdict."""
+    import re
+    content = "<think>endless reasoning that never closes..."
+    out = re.sub(r"<think>.*?(?:</think>|\Z)", "", content, flags=re.DOTALL).strip()
+    assert out == ""
+    closed = "<think>thoughts</think>\nFinal answer\n{\"verdict\":\"PASS\"}"
+    out2 = re.sub(r"<think>.*?(?:</think>|\Z)", "", closed, flags=re.DOTALL).strip()
+    assert out2.startswith("Final answer")

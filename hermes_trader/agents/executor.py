@@ -746,6 +746,10 @@ def close_position_market(coin: str) -> Dict[str, Any]:
     avg_fill_px = (sum(px * sz for px, sz in fills) / total_filled) if total_filled else None
     out: Dict[str, Any] = {**res, "coin": coin, "side": side,
                             "entry_px": entry_px, "leverage": leverage}
+    if avg_fill_px is not None:
+        # res carries only the LAST attempt's avg_px; report the size-weighted
+        # price across all fills so multi-attempt closes don't mislead callers.
+        out["avg_px"] = avg_fill_px
 
     if res.get("ok") and remaining > 0:
         # Residual position still live after retries: keep the tracker so the
