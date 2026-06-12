@@ -11,6 +11,7 @@ from hermes_trader.agents import research
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
     for var in ("HERMES_LLM_PROVIDER", "HERMES_LLM_MODEL", "HERMES_LLM_BASE_URL",
+                "HERMES_LLM_THINKING", "HERMES_LLM_MAX_TOKENS",
                 "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "OPENAI_API_KEY",
                 "GEMINI_API_KEY", "MINIMAX_API_KEY", "ANTHROPIC_API_KEY",
                 "ANTHROPIC_MODEL"):
@@ -133,3 +134,27 @@ def test_anthropic_failure_is_loud_but_returns_empty(monkeypatch, caplog):
     with caplog.at_level("ERROR"):
         assert research._call_ai("s", "u") == ""
     assert any("FAILED" in r.message for r in caplog.records)
+
+
+def test_thinking_and_max_tokens_knobs(monkeypatch):
+    monkeypatch.setenv("HERMES_LLM_PROVIDER", "anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setenv("HERMES_LLM_THINKING", "adaptive")
+    monkeypatch.setenv("HERMES_LLM_MAX_TOKENS", "4096")
+    captured = {}
+    monkeypatch.setattr(research, "_anthropic_client",
+                        lambda api_key: _StubAnthropicClient(captured))
+    assert research._call_ai("s", "u") == "VERDICT TEXT"
+    assert captured["thinking"] == {"type": "adaptive"}
+    assert captured["max_tokens"] == 4096
+
+
+def test_thinking_off_by_default(monkeypatch):
+    monkeypatch.setenv("HERMES_LLM_PROVIDER", "anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    captured = {}
+    monkeypatch.setattr(research, "_anthropic_client",
+                        lambda api_key: _StubAnthropicClient(captured))
+    research._call_ai("s", "u")
+    assert "thinking" not in captured
+    assert captured["max_tokens"] == 512

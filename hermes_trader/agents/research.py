@@ -348,6 +348,16 @@ def _resolve_provider() -> tuple:
     return provider, base_url, key, model or cfg["default_model"]
 
 
+def _llm_max_tokens() -> int:
+    """Response token budget. The 512 default is a cost optimization (verdict
+    JSON + a few bullets fits easily); raise via HERMES_LLM_MAX_TOKENS on
+    flat-rate/quota plans, mandatory when HERMES_LLM_THINKING is on."""
+    try:
+        return int(os.environ.get("HERMES_LLM_MAX_TOKENS", "512") or 512)
+    except ValueError:
+        return 512
+
+
 _anthropic_client_instance = None
 
 
@@ -372,13 +382,22 @@ def _call_anthropic(api_key: str, model: str, system_prompt: str,
     Same loud-failure contract as the chat-completions path: any error logs
     at ERROR level so a billing/auth outage can't masquerade as 'no setups'.
     No temperature param — removed on recent Claude models (400 if sent).
+
+    HERMES_LLM_THINKING=adaptive enables reasoning (Claude adaptive thinking /
+    MiniMax-M3 thinking) — thinking blocks are skipped by the text extraction
+    below, so parse_verdict still sees only the final answer. Raise
+    HERMES_LLM_MAX_TOKENS alongside it: thinking spends from the same budget.
     """
+    kwargs: Dict[str, Any] = {}
+    if os.environ.get("HERMES_LLM_THINKING", "").strip().lower() in ("adaptive", "on", "true", "1"):
+        kwargs["thinking"] = {"type": "adaptive"}
     try:
         resp = _anthropic_client(api_key).messages.create(
             model=model,
-            max_tokens=512,
+            max_tokens=_llm_max_tokens(),
             system=system_prompt,
             messages=[{"role": "user", "content": user_message}],
+            **kwargs,
         )
         return next((b.text for b in resp.content if b.type == "text"), "")
     except Exception as e:
@@ -432,7 +451,8 @@ async def _async_do_call(
                 # "requires more credits ... can only afford N" — reserving 1024 of
                 # max cost. 512 fits the real output with margin and ~halves the
                 # reserved cost so research keeps working on a lean balance.
-                "max_tokens": 512,
+                # Override via HERMES_LLM_MAX_TOKENS on flat-rate/quota plans.
+                "max_tokens": _llm_max_tokens(),
                 "temperature": 0.1,
             },
             headers={"Authorization": f"Bearer {api_key}"},
