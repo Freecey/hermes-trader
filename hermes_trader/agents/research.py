@@ -497,6 +497,18 @@ def parse_verdict(
     if not ai_text:
         ai_text = ""
 
+    def _coerce_px(val: Any, default: float) -> float:
+        """LLM price fields arrive as numbers, strings, nulls or garbage —
+        a non-finite/negative/unparseable value must fall back, not crash
+        downstream float math (position notional, bracket calcs)."""
+        try:
+            px = float(val)
+        except (TypeError, ValueError):
+            return float(default)
+        if not math.isfinite(px) or px < 0:
+            return float(default)
+        return px
+
     verdict = "PASS"
     confidence = 0.0
     side = None
@@ -516,11 +528,14 @@ def parse_verdict(
             json_str = line
             break
 
-    # Fallback: regex match
+    # Fallback: regex match. Take the LAST occurrence, not the first — the
+    # contract puts the verdict JSON at the END; an earlier {"verdict":...}
+    # appearing inside the model's reasoning (or inside an injected news
+    # headline) must never win over the real one.
     if not json_str:
-        match = re.search(r'\{[^{}]*"verdict"[^{}]*\}', ai_text)
-        if match:
-            json_str = match.group(0)
+        matches = re.findall(r'\{[^{}]*"verdict"[^{}]*"confidence"[^{}]*\}', ai_text)
+        if matches:
+            json_str = matches[-1]
 
     if json_str:
         try:
@@ -537,9 +552,10 @@ def parse_verdict(
 
             confidence = parsed.get("confidence", 0)
             side = parsed.get("side") if parsed.get("side") in ("long", "short") else None
-            entry_px = parsed.get("entry_px") or parsed.get("entryPx", perception.get("mid", 0))
-            stop_px = parsed.get("stop_px") or parsed.get("stopPx", 0)
-            tp_px = parsed.get("tp_px") or parsed.get("tpPx", 0)
+            entry_px = _coerce_px(parsed.get("entry_px") or parsed.get("entryPx"),
+                                  perception.get("mid", 0))
+            stop_px = _coerce_px(parsed.get("stop_px") or parsed.get("stopPx"), 0.0)
+            tp_px = _coerce_px(parsed.get("tp_px") or parsed.get("tpPx"), 0.0)
             nr = str(parsed.get("news_risk") or parsed.get("newsRisk") or "none").lower()
             news_risk = nr if nr in ("none", "positive", "negative") else "none"
             reasoning = parsed.get("reasoning", ai_text[:500])

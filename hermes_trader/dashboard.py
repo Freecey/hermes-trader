@@ -84,7 +84,9 @@ def _ttl_cached(key: str, ttl: float, fn):
             return hit[1]
     val = fn()
     with _TTL_CACHE_LOCK:
-        _TTL_CACHE[key] = (now, val)
+        # Stamp AFTER the compute: a slow fn() stamped with the pre-compute
+        # time would serve data older than the TTL promises.
+        _TTL_CACHE[key] = (time.time(), val)
     return val
 
 

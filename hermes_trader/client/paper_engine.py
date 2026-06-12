@@ -110,6 +110,11 @@ def _load() -> Dict[str, Any]:
                 _state = json.load(f)
             _state_mtime_ns = mtime_ns
         except (FileNotFoundError, json.JSONDecodeError):
+            # Keep the in-memory book if we have one (an externally deleted /
+            # corrupted file must not wipe a running session — the next _save
+            # re-creates it), but invalidate the mtime so the cache can't be
+            # mistaken for a clean read of the missing file.
+            _state_mtime_ns = None
             if _state is None:
                 _state = _fresh_state()
                 logger.info(f"[paper] fresh book: ${_state['cash']:.2f} starting equity")
