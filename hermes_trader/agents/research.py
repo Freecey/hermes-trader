@@ -441,7 +441,13 @@ async def _async_do_call(
             data = resp.json()
             choices = data.get("choices", [])
             if choices:
-                return choices[0].get("message", {}).get("content", "")
+                content = choices[0].get("message", {}).get("content", "") or ""
+                # Reasoning models on OpenAI-compat endpoints (MiniMax-M3,
+                # DeepSeek-R1 style) inline chain-of-thought as <think>...
+                # </think> ahead of the answer. Strip it: parse_verdict's
+                # JSON-on-last-line contract breaks if thinking is left in.
+                return re.sub(r"<think>.*?</think>", "", content,
+                              flags=re.DOTALL).strip()
             logger.error("[research] LLM returned 200 but no choices — empty response")
             return ""
         # LOUD failure. A non-200 (esp. 402 Payment Required = out of OpenRouter
