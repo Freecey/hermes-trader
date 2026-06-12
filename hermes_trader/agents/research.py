@@ -281,32 +281,145 @@ def _build_user_message(
     ])
 
 
-def _call_ai(system_prompt: str, user_message: str) -> str:
-    """Call the OpenRouter LLM API (runs the async client in a fresh event loop)."""
-    openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
-    model = os.environ.get("OPENROUTER_MODEL", "x-ai/grok-4.3")
+# ── LLM provider registry ─────────────────────────────────────────────────────
+# HERMES_LLM_PROVIDER selects the research backend (default: openrouter).
+# OpenRouter, OpenAI, Google and MiniMax all speak the OpenAI chat-completions
+# wire format, so they share one call path — only base URL, key env var and
+# default model differ. HERMES_LLM_BASE_URL overrides the URL for any of them
+# (also the hook for a local OpenAI-compatible server, e.g. Ollama/vLLM).
+# Anthropic has NO OpenAI-compatible endpoint — its native Messages API has a
+# different request/response shape — so it gets a dedicated branch using the
+# official SDK.
+_OPENAI_COMPAT_PROVIDERS: Dict[str, Dict[str, str]] = {
+    "openrouter": {
+        "base_url": "https://openrouter.ai/api/v1/chat/completions",
+        "key_env": "OPENROUTER_API_KEY",
+        "default_model": "x-ai/grok-4.3",
+    },
+    "openai": {
+        "base_url": "https://api.openai.com/v1/chat/completions",
+        "key_env": "OPENAI_API_KEY",
+        "default_model": "gpt-5.1",
+    },
+    "google": {
+        # Gemini's OpenAI-compatibility endpoint (Bearer auth, same payload).
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        "key_env": "GEMINI_API_KEY",
+        "default_model": "gemini-2.5-flash",
+    },
+    "minimax": {
+        # MiniMax also exposes an Anthropic-compatible endpoint
+        # (https://api.minimax.io/anthropic) — reachable via the anthropic
+        # provider + ANTHROPIC_BASE_URL if preferred over this one.
+        "base_url": "https://api.minimax.io/v1/chat/completions",
+        "key_env": "MINIMAX_API_KEY",
+        "default_model": "MiniMax-M3",
+    },
+}
 
-    if not openrouter_key:
-        logger.warning("[research] OPENROUTER_API_KEY not set — returning empty response")
+_ANTHROPIC_DEFAULT_MODEL = "claude-opus-4-8"
+
+
+def _resolve_provider() -> tuple:
+    """Resolve (provider, base_url, api_key, model) from the environment.
+
+    HERMES_LLM_MODEL overrides the model for any provider; the legacy
+    OPENROUTER_MODEL is still honored on the openrouter provider. An unknown
+    provider name falls back to openrouter rather than killing research.
+    """
+    provider = os.environ.get("HERMES_LLM_PROVIDER", "openrouter").strip().lower()
+    model = os.environ.get("HERMES_LLM_MODEL", "")
+
+    if provider == "anthropic":
+        key = os.environ.get("ANTHROPIC_API_KEY", "")
+        model = model or os.environ.get("ANTHROPIC_MODEL", _ANTHROPIC_DEFAULT_MODEL)
+        return provider, "", key, model
+
+    cfg = _OPENAI_COMPAT_PROVIDERS.get(provider)
+    if cfg is None:
+        logger.error(f"[research] unknown HERMES_LLM_PROVIDER {provider!r} — "
+                     f"falling back to openrouter")
+        provider, cfg = "openrouter", _OPENAI_COMPAT_PROVIDERS["openrouter"]
+
+    base_url = os.environ.get("HERMES_LLM_BASE_URL", cfg["base_url"])
+    key = os.environ.get(cfg["key_env"], "")
+    if provider == "openrouter" and not model:
+        model = os.environ.get("OPENROUTER_MODEL", "")
+    return provider, base_url, key, model or cfg["default_model"]
+
+
+_anthropic_client_instance = None
+
+
+def _anthropic_client(api_key: str):
+    """Lazily create (and reuse) the official Anthropic SDK client.
+
+    The SDK natively honors ANTHROPIC_BASE_URL, so this branch also reaches
+    Anthropic-API-compatible providers (e.g. MiniMax at
+    https://api.minimax.io/anthropic with HERMES_LLM_MODEL=MiniMax-M3).
+    """
+    global _anthropic_client_instance
+    if _anthropic_client_instance is None:
+        import anthropic
+        _anthropic_client_instance = anthropic.Anthropic(api_key=api_key)
+    return _anthropic_client_instance
+
+
+def _call_anthropic(api_key: str, model: str, system_prompt: str,
+                    user_message: str) -> str:
+    """Call Claude via the native Messages API (official SDK).
+
+    Same loud-failure contract as the chat-completions path: any error logs
+    at ERROR level so a billing/auth outage can't masquerade as 'no setups'.
+    No temperature param — removed on recent Claude models (400 if sent).
+    """
+    try:
+        resp = _anthropic_client(api_key).messages.create(
+            model=model,
+            max_tokens=512,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_message}],
+        )
+        return next((b.text for b in resp.content if b.type == "text"), "")
+    except Exception as e:
+        logger.error(
+            f"[research] Anthropic call FAILED: {e} — AI research is DOWN, "
+            f"all verdicts will default to PASS until fixed."
+        )
         return ""
+
+
+def _call_ai(system_prompt: str, user_message: str) -> str:
+    """Call the configured LLM provider (see _OPENAI_COMPAT_PROVIDERS)."""
+    provider, base_url, api_key, model = _resolve_provider()
+
+    if not api_key:
+        logger.warning(f"[research] API key for provider {provider!r} not set "
+                       f"— returning empty response")
+        return ""
+
+    if provider == "anthropic":
+        return _call_anthropic(api_key, model, system_prompt, user_message)
 
     loop = asyncio.new_event_loop()
     try:
-        return loop.run_until_complete(_async_do_call(openrouter_key, model, system_prompt, user_message))
+        return loop.run_until_complete(
+            _async_do_call(base_url, api_key, model, system_prompt, user_message))
     finally:
         loop.close()
 
 
 async def _async_do_call(
-    openrouter_key: str,
+    base_url: str,
+    api_key: str,
     model: str,
     system_prompt: str,
     user_message: str,
 ) -> str:
-    """Async POST to the OpenRouter chat-completions endpoint."""
+    """Async POST to an OpenAI-compatible chat-completions endpoint."""
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
         resp = await client.post(
-            "https://openrouter.ai/api/v1/chat/completions",
+            base_url,
             json={
                 "model": model,
                 "messages": [
@@ -322,7 +435,7 @@ async def _async_do_call(
                 "max_tokens": 512,
                 "temperature": 0.1,
             },
-            headers={"Authorization": f"Bearer {openrouter_key}"},
+            headers={"Authorization": f"Bearer {api_key}"},
         )
         if resp.is_success:
             data = resp.json()

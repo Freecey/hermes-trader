@@ -164,9 +164,25 @@ are gitignored.
 Copy `.env.local.example` → `.env.local` and fill in:
 
 ```bash
-# ── OpenRouter (AI research) ─────────────────────────────────
-OPENROUTER_API_KEY=sk-or-...your-key      # required
-OPENROUTER_MODEL=x-ai/grok-4.3            # optional — this is the default
+# ── AI research provider ─────────────────────────────────────
+# HERMES_LLM_PROVIDER selects the backend: openrouter (default) | openai |
+# google | minimax | anthropic. Set the matching key; HERMES_LLM_MODEL
+# overrides the model for any provider.
+HERMES_LLM_PROVIDER=openrouter
+OPENROUTER_API_KEY=sk-or-...your-key      # required for openrouter
+OPENROUTER_MODEL=x-ai/grok-4.3            # optional — openrouter default
+# OPENAI_API_KEY=sk-...                   # provider=openai   (default gpt-5.1)
+# GEMINI_API_KEY=...                      # provider=google   (default gemini-2.5-flash)
+# MINIMAX_API_KEY=...                     # provider=minimax  (default MiniMax-M3)
+# ANTHROPIC_API_KEY=sk-ant-...            # provider=anthropic (default claude-opus-4-8,
+#                                           native Messages API via the official SDK)
+# HERMES_LLM_MODEL=...                    # optional — model override, any provider
+# HERMES_LLM_BASE_URL=...                 # optional — custom OpenAI-compatible
+#                                           endpoint (e.g. local Ollama/vLLM)
+# Tip: the anthropic provider honors ANTHROPIC_BASE_URL, so it also reaches
+# Anthropic-API-compatible backends — e.g. MiniMax via
+# HERMES_LLM_PROVIDER=anthropic + ANTHROPIC_BASE_URL=https://api.minimax.io/anthropic
+# + ANTHROPIC_API_KEY=<minimax key> + HERMES_LLM_MODEL=MiniMax-M3
 
 # ── Hyperliquid ──────────────────────────────────────────────
 HYPERLIQUID_WALLET_ADDRESS=0x...          # required — the signing (agent) wallet
