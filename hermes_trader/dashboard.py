@@ -1909,7 +1909,7 @@ async function loadTrackers() {
   const data = await r.json();
   const el = document.getElementById('trackers');
   if (!Array.isArray(data) || data.length === 0) {
-    el.textContent = 'no active DSL trackers — nothing currently being managed.\n(this is normal when 0 positions are open.)';
+    el.textContent = 'no active DSL trackers — nothing currently being managed.\\n(this is normal when 0 positions are open.)';
     el.style.color = '#71717a';
     el.style.fontStyle = 'italic';
   } else {

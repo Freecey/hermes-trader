@@ -303,3 +303,17 @@ def test_env_endpoint_shows_settings_but_never_leaks_keys(monkeypatch):
     # The contract that matters: no secret value anywhere in the response.
     assert secret not in r.text
     assert "BSA-ALSO-SECRET" not in r.text
+
+
+def test_operator_page_javascript_has_no_raw_newline_in_strings():
+    """Regression: a Python '\\n' rendered as a REAL newline inside a JS
+    single-quoted string killed the whole operator script with a
+    SyntaxError — the page sat on 'loading…' forever."""
+    import re
+    from fastapi.testclient import TestClient
+    from hermes_trader.server import app
+
+    html = TestClient(app).get("/operator").text
+    scripts = "".join(re.findall(r"<script>(.*?)</script>", html, re.DOTALL))
+    # The fixed string must carry an ESCAPED \n, not a literal line break.
+    assert "currently being managed.\\n(this is normal" in scripts
