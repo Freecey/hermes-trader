@@ -8,10 +8,13 @@ import logging
 import math
 import os
 import re
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List
+from xml.etree import ElementTree
 
 import httpx
 
@@ -93,14 +96,101 @@ def _fetch_funding_rate(coin: str) -> str:
 NEWS_FRESHNESS_DAYS = 2
 
 
-def _fetch_news(coin: str) -> str:
-    """Recent (last NEWS_FRESHNESS_DAYS) news headlines for a coin via the
-    Brave Search API.
+# ── News providers ─────────────────────────────────────────────────────────────
+# HERMES_NEWS_PROVIDER selects the headline source: brave (default, needs
+# BRAVE_API_KEY) | rss (keyless — public crypto-media feeds) | off.
+# Both share the same contract: a ' | '-joined string of ≤5 recent coin-
+# specific headlines, or 'no news'. Never raises — news is supplementary.
 
-    Returns a compact ' | '-joined headline string, or 'no news' when no
-    BRAVE_API_KEY is set or the request fails — news is a supplementary
+_DEFAULT_RSS_FEEDS = [
+    "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    "https://cointelegraph.com/rss",
+    "https://decrypt.co/feed",
+]
+_RSS_CACHE_TTL_S = 300.0
+_rss_cache_lock = threading.Lock()
+_rss_cache: tuple = (0.0, [])  # (fetched_at, [(title, epoch_s)])
+
+
+def _rss_headlines() -> list:
+    """All recent headlines from the configured feeds, cached for 5 minutes.
+
+    One shared fetch serves every coin researched in the window — per-coin
+    filtering happens locally, so N research calls cost at most one round of
+    feed fetches instead of N web searches."""
+    global _rss_cache
+    now = time.time()
+    with _rss_cache_lock:
+        if now - _rss_cache[0] < _RSS_CACHE_TTL_S:
+            return _rss_cache[1]
+
+    feeds = [u.strip() for u in os.environ.get(
+        "HERMES_RSS_FEEDS", ",".join(_DEFAULT_RSS_FEEDS)).split(",") if u.strip()]
+    items: list = []
+    for url in feeds:
+        try:
+            resp = httpx.get(url, timeout=10.0, follow_redirects=True,
+                             headers={"User-Agent": "hermes-trader/0.3 news"})
+            if not resp.is_success:
+                logger.warning(f"[research] RSS feed HTTP {resp.status_code}: {url}")
+                continue
+            root = ElementTree.fromstring(resp.content)
+            # RSS 2.0 <item> and Atom <entry> both appear in the wild.
+            entries = list(root.iter("item")) + list(
+                root.iter("{http://www.w3.org/2005/Atom}entry"))
+            for it in entries:
+                title = (it.findtext("title") or it.findtext(
+                    "{http://www.w3.org/2005/Atom}title") or "").strip()
+                if not title:
+                    continue
+                pub = (it.findtext("pubDate")
+                       or it.findtext("{http://www.w3.org/2005/Atom}updated") or "")
+                try:
+                    ts = parsedate_to_datetime(pub).timestamp()
+                except Exception:
+                    ts = now  # undated entries count as fresh rather than lost
+                items.append((title, ts))
+        except Exception as e:
+            logger.warning(f"[research] RSS feed failed {url}: {e}")
+
+    with _rss_cache_lock:
+        _rss_cache = (now, items)
+    return items
+
+
+def _fetch_news_rss(coin: str) -> str:
+    """Keyless news: filter the shared RSS headline pool for this coin.
+
+    Ticker matching is case-SENSITIVE on word boundaries — 'NEAR Protocol'
+    matches NEAR, but 'bitcoin near all-time high' does not. HIP-3 names
+    (`xyz:NVDA`) are matched on the bare symbol."""
+    base = coin.split(":", 1)[-1]
+    if not base:
+        return "no news"
+    pattern = re.compile(rf"\b{re.escape(base)}\b")
+    cutoff = time.time() - NEWS_FRESHNESS_DAYS * 86_400
+    hits = [title for title, ts in _rss_headlines()
+            if ts >= cutoff and pattern.search(title)]
+    return " | ".join(hits[:5]) if hits else "no news"
+
+
+def _fetch_news(coin: str) -> str:
+    """Recent (last NEWS_FRESHNESS_DAYS) news headlines for a coin.
+
+    Returns a compact ' | '-joined headline string, or 'no news' when the
+    provider is unavailable or the request fails — news is a supplementary
     signal, so a fetch failure degrades gracefully and never blocks research.
     """
+    provider = os.environ.get("HERMES_NEWS_PROVIDER", "brave").strip().lower()
+    if provider in ("off", "none"):
+        return "no news"
+    if provider == "rss":
+        try:
+            return _fetch_news_rss(coin)
+        except Exception as e:
+            logger.warning(f"[research] RSS news failed for {coin}: {e}")
+            return "no news"
+
     key = os.environ.get("BRAVE_API_KEY", "")
     if not key:
         return "no news"

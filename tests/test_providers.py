@@ -194,3 +194,59 @@ def test_parse_verdict_fallback_takes_last_json_not_reasoning_artifact():
     out = research.parse_verdict(text, "BTC", {"mid": 100.0})
     assert out["verdict"] == "PASS"
     assert out["confidence"] == 0.1
+
+
+# ── news providers ──────────────────────────────────────────────────────
+
+_FAKE_HEADLINES = [
+    ("NEAR Protocol unveils chain abstraction upgrade", None),   # fresh, NEAR
+    ("Bitcoin trades near all-time high as ETFs surge", None),   # 'near' lowercase — no match
+    ("Toncoin (TON) bridge exploited for $40M", None),           # fresh, TON
+    ("TON Foundation responds to exploit", -3 * 86_400),         # too old (3 days)
+]
+
+
+def _stub_headlines(monkeypatch):
+    import time as _t
+    now = _t.time()
+    items = [(t, now + (off or 0)) for t, off in _FAKE_HEADLINES]
+    monkeypatch.setattr(research, "_rss_headlines", lambda: items)
+
+
+def test_rss_news_matches_ticker_word_boundary_case_sensitive(monkeypatch):
+    monkeypatch.setenv("HERMES_NEWS_PROVIDER", "rss")
+    _stub_headlines(monkeypatch)
+    out = research._fetch_news("NEAR")
+    assert "chain abstraction" in out
+    assert "all-time high" not in out  # lowercase 'near' must not match
+
+
+def test_rss_news_filters_stale_headlines(monkeypatch):
+    monkeypatch.setenv("HERMES_NEWS_PROVIDER", "rss")
+    _stub_headlines(monkeypatch)
+    out = research._fetch_news("TON")
+    assert "exploited for $40M" in out
+    assert "Foundation responds" not in out  # 3 days old > freshness window
+
+
+def test_rss_news_strips_hip3_namespace(monkeypatch):
+    monkeypatch.setenv("HERMES_NEWS_PROVIDER", "rss")
+    import time as _t
+    monkeypatch.setattr(research, "_rss_headlines",
+                        lambda: [("NVDA beats earnings expectations", _t.time())])
+    assert "beats earnings" in research._fetch_news("xyz:NVDA")
+
+
+def test_news_provider_off_and_default_brave_keyless(monkeypatch):
+    monkeypatch.setenv("HERMES_NEWS_PROVIDER", "off")
+    assert research._fetch_news("BTC") == "no news"
+    monkeypatch.delenv("HERMES_NEWS_PROVIDER", raising=False)
+    monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+    assert research._fetch_news("BTC") == "no news"  # brave path, no key
+
+
+def test_rss_failure_degrades_to_no_news(monkeypatch):
+    monkeypatch.setenv("HERMES_NEWS_PROVIDER", "rss")
+    monkeypatch.setattr(research, "_rss_headlines",
+                        lambda: (_ for _ in ()).throw(RuntimeError("feeds down")))
+    assert research._fetch_news("BTC") == "no news"
