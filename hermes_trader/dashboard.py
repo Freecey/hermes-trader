@@ -1820,6 +1820,7 @@ _OPERATOR_HTML = """<!doctype html>
   <section class="bg-zinc-900 rounded-lg p-4">
     <div class="text-xs text-zinc-500 mb-2">danger zone</div>
     <button class="btn danger" onclick="setMode('OFF')">set mode OFF (halt new trades)</button>
+    <button class="btn" onclick="setMode('PAPER')">set mode PAPER (simulated fills)</button>
     <button class="btn" onclick="setMode('LIVE')">set mode LIVE</button>
   </section>
 </div>
@@ -2018,8 +2019,8 @@ def register_routes(app: FastAPI) -> None:
         from hermes_trader.agents.config_store import write_agent_config
         body = await request.json()
         mode = (body.get("mode") or "").upper()
-        if mode not in {"OFF", "LIVE"}:
-            raise HTTPException(400, "mode must be OFF or LIVE")
+        if mode not in {"OFF", "PAPER", "LIVE"}:
+            raise HTTPException(400, "mode must be OFF, PAPER or LIVE")
         cfg = read_agent_config()
         cfg["mode"] = mode
         write_agent_config(cfg)

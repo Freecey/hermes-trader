@@ -204,3 +204,24 @@ def test_fetch_account_state_routes_to_paper(monkeypatch):
     assert len(state["asset_positions"]) == 1
     assert hl.resolve_user_address() == "paper"
     assert hl.fetch_aggregate_contributions_since("paper", 1) == 0.0
+
+
+# ── operator endpoint: PAPER is a valid mode ────────────────────────────
+
+def test_operator_mode_endpoint_accepts_paper(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+    from hermes_trader.agents import config_store
+    from hermes_trader.server import app
+
+    monkeypatch.setenv("HERMES_OPERATOR_TOKEN", "test-token")
+    monkeypatch.setattr(config_store, "CONFIG_PATH", str(tmp_path / "cfg.json"))
+    client = TestClient(app)
+
+    ok = client.post("/api/dashboard/operator/mode", json={"mode": "PAPER"},
+                     headers={"X-Operator-Token": "test-token"})
+    assert ok.status_code == 200 and ok.json()["mode"] == "PAPER"
+    assert config_store.read_agent_config()["mode"] == "PAPER"
+
+    bad = client.post("/api/dashboard/operator/mode", json={"mode": "YOLO"},
+                      headers={"X-Operator-Token": "test-token"})
+    assert bad.status_code == 400
