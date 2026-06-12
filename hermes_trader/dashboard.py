@@ -1669,6 +1669,15 @@ _CONFIG_HTML = """<!doctype html>
     </div>
   </section>
 
+  <section class="bg-zinc-900 p-6 mb-6">
+    <div class="flex items-center justify-between mb-4">
+      <span class="pixel text-[10px] text-zinc-500">.env.local — read at process START (restart loop/server to apply) · keys shown as presence only</span>
+    </div>
+    <div id="env-grid" class="cfg-grid">
+      <div class="cfg-section-head">loading…</div>
+    </div>
+  </section>
+
   <footer class="text-[10px] text-zinc-600 mt-6 text-center pixel">
     one wallet · live · not financial advice
   </footer>
@@ -1740,8 +1749,34 @@ async function loadConfig() {
   }
 }
 
-loadConfig();
+async function loadEnv() {
+  try {
+    const r = await fetch('/api/dashboard/env');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const env = await r.json();
+    const grid = document.getElementById('env-grid');
+    grid.innerHTML = '';
+    for (const [section, values] of Object.entries(env)) {
+      const head = document.createElement('div');
+      head.className = 'cfg-section-head';
+      head.textContent = '── ' + section + ' ──';
+      grid.appendChild(head);
+      for (const [k, v] of Object.entries(values)) {
+        const keyEl = document.createElement('div'); keyEl.className = 'cfg-key'; keyEl.textContent = k;
+        const valEl = document.createElement('div'); valEl.className = 'cfg-val ' + classifyVal(v);
+        valEl.innerHTML = formatVal(v);
+        grid.appendChild(keyEl); grid.appendChild(valEl);
+      }
+    }
+  } catch (e) {
+    document.getElementById('env-grid').innerHTML =
+      '<div class="cfg-section-head">load failed: ' + (e.message || e) + '</div>';
+  }
+}
+
+loadConfig(); loadEnv();
 setInterval(loadConfig, 5000); // hot-reloads alongside the trading loop
+// env is frozen at process start — one load is enough
 
 // Highlight the active page + carry the operator token across navigation.
 (function(){
@@ -1953,6 +1988,46 @@ def register_routes(app: FastAPI) -> None:
         """Read-only JSON dump of `.agent-config.json` for the /config page.
         Hot-reloads alongside the trading loop (no caching)."""
         return JSONResponse(read_agent_config())
+
+    @app.get("/api/dashboard/env")
+    async def dashboard_env() -> JSONResponse:
+        """Sanitized runtime-environment snapshot for the /config page.
+
+        Shows the EFFECTIVE settings (provider/model/news with defaults
+        resolved, same resolution code the research path uses) and key
+        PRESENCE only — never a key value. Unlike the hot-reloaded agent
+        config, env vars are frozen at process start; the page says so.
+        """
+        from hermes_trader.agents.research import _llm_max_tokens, _resolve_provider
+        provider, base_url, api_key, model = _resolve_provider()
+        if provider == "anthropic":
+            base_url = os.environ.get("ANTHROPIC_BASE_URL", "") or "api.anthropic.com (default)"
+        thinking_on = os.environ.get("HERMES_LLM_THINKING", "").strip().lower() in (
+            "adaptive", "on", "true", "1")
+        return JSONResponse({
+            "llm": {
+                "provider": provider,
+                "model": model,
+                "thinking": "adaptive" if thinking_on else "off",
+                "max_tokens": _llm_max_tokens(),
+                "base_url": base_url,
+                "api_key": "set ✓" if api_key else "MISSING ✗",
+            },
+            "news": {
+                "provider": os.environ.get("HERMES_NEWS_PROVIDER", "brave").strip().lower(),
+                "brave_key": "set ✓" if os.environ.get("BRAVE_API_KEY") else "absent",
+                "rss_feeds": ("custom" if os.environ.get("HERMES_RSS_FEEDS")
+                              else "coindesk + cointelegraph + decrypt (default)"),
+            },
+            "scan": {
+                "interval_s": os.environ.get("HERMES_SCAN_INTERVAL", "60 (default)"),
+                "max_markets": os.environ.get("HERMES_MAX_MARKETS", "60 (default)"),
+            },
+            "hyperliquid": {
+                "wallet_address": "set ✓" if os.environ.get("HYPERLIQUID_WALLET_ADDRESS") else "absent (PAPER ok)",
+                "private_key": "set ✓" if os.environ.get("HYPERLIQUID_PRIVATE_KEY") else "absent (PAPER ok)",
+            },
+        })
 
     @app.get("/api/dashboard/summary")
     async def dashboard_summary() -> JSONResponse:

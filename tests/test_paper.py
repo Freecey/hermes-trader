@@ -277,3 +277,29 @@ def test_trigger_not_double_fired_after_external_state_change(tmp_path):
     st = paper_engine._load()
     assert st["realized_pnl"] == pytest.approx(-250.0)  # fired ONCE, elsewhere
     assert not any(f["kind"] == "trigger_sl" for f in st["fills"])
+
+
+# ── /api/dashboard/env: effective settings, never key values ────────────
+
+def test_env_endpoint_shows_settings_but_never_leaks_keys(monkeypatch):
+    from fastapi.testclient import TestClient
+    from hermes_trader.server import app
+
+    secret = "sk-ant-SUPER-SECRET-VALUE-12345"
+    monkeypatch.setenv("HERMES_LLM_PROVIDER", "anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", secret)
+    monkeypatch.setenv("HERMES_LLM_THINKING", "adaptive")
+    monkeypatch.setenv("HERMES_NEWS_PROVIDER", "rss")
+    monkeypatch.setenv("BRAVE_API_KEY", "BSA-ALSO-SECRET")
+
+    r = TestClient(app).get("/api/dashboard/env")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["llm"]["provider"] == "anthropic"
+    assert body["llm"]["thinking"] == "adaptive"
+    assert body["llm"]["api_key"].startswith("set")
+    assert body["news"]["provider"] == "rss"
+    assert body["news"]["brave_key"].startswith("set")
+    # The contract that matters: no secret value anywhere in the response.
+    assert secret not in r.text
+    assert "BSA-ALSO-SECRET" not in r.text
