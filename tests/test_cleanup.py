@@ -225,6 +225,9 @@ def test_parse_verdict_empty_defaults_to_pass():
 
 def test_fetch_news_no_key_returns_no_news(monkeypatch):
     """Without BRAVE_API_KEY, news fetch degrades to 'no news' — never raises."""
+    # Pin the provider: conftest loads the dev .env.local (which may set
+    # HERMES_NEWS_PROVIDER=rss), and this test targets the Brave no-key path.
+    monkeypatch.setenv("HERMES_NEWS_PROVIDER", "brave")
     monkeypatch.delenv("BRAVE_API_KEY", raising=False)
     from hermes_trader.agents.research import _fetch_news
     assert _fetch_news("BTC") == "no news"
@@ -234,6 +237,7 @@ def test_fetch_news_sends_freshness_window(monkeypatch):
     """The Brave request must carry a freshness range so year-old articles
     (the AIXBT 2025 hack) don't feed the gate. Regression guard."""
     from hermes_trader.agents import research
+    monkeypatch.setenv("HERMES_NEWS_PROVIDER", "brave")
     monkeypatch.setenv("BRAVE_API_KEY", "k")
     captured = {}
     class _Resp:
