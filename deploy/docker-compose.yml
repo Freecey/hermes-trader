@@ -1,0 +1,86 @@
+# hermes-trader — PAPER deployment for a self-hosted box (Proxmox VM / homelab).
+#
+# Runs the same image twice — dashboard (web) + trading loop (loop) — sharing one
+# named volume mounted at /data, exactly like the Fly two-process layout but on
+# plain Docker. All runtime state (paper book, DSL trackers, agent memory,
+# session log, config) lives on that volume and survives `docker compose down`.
+#
+# Secrets/config come from ../.env.local (never baked into the image — it is
+# .dockerignore'd). Inside the container there are NO ANTHROPIC_* shell vars from
+# any harness, so the MiniMax-via-ANTHROPIC_BASE_URL setup works without the
+# `env -u ...` dance the local launch needed.
+#
+#   cd deploy
+#   docker compose up -d --build      # first boot — builds image, seeds PAPER config
+#   docker compose logs -f loop       # watch the trading loop
+#   # dashboard:  http://<vm-ip>:8000   ·  operator: /operator?token=<HERMES_OPERATOR_TOKEN>
+
+x-hermes-build: &hermes-build
+  context: ..
+  dockerfile: Dockerfile
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  # One-shot: drop a PAPER config into the volume on first boot. `cp -n` is
+  # no-clobber, so restarts (and mode flips you make in the operator console)
+  # are preserved — it only writes when /data/.agent-config.json is absent.
+  seed:
+    build: *hermes-build
+    image: hermes-trader:paper
+    entrypoint: ["sh", "-c"]
+    command: ["cp -n /seed/agent-config.json /data/.agent-config.json && echo '[seed] PAPER config written' || echo '[seed] config already present — left untouched'"]
+    volumes:
+      - hermes_data:/data
+      - ./agent-config.paper.json:/seed/agent-config.json:ro
+    restart: "no"
+    logging: *default-logging
+
+  web:
+    build: *hermes-build
+    image: hermes-trader:paper
+    env_file:
+      - ../.env.local
+    environment:
+      HERMES_HOST: "0.0.0.0"
+      HERMES_PORT: "8000"
+    ports:
+      - "8000:8000"
+    volumes:
+      - hermes_data:/data
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    mem_limit: 512m
+    restart: unless-stopped
+    logging: *default-logging
+
+  loop:
+    build: *hermes-build
+    image: hermes-trader:paper
+    command: ["python3", "scripts/trading_loop.py"]
+    env_file:
+      - ../.env.local
+    volumes:
+      - hermes_data:/data
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      web:
+        condition: service_healthy
+    mem_limit: 512m
+    restart: unless-stopped
+    logging: *default-logging
+
+volumes:
+  hermes_data:

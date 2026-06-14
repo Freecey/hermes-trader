@@ -1,0 +1,11 @@
+{
+  "mode": "PAPER",
+  "paper_starting_equity": 100,
+  "leverage": 3,
+  "equity_fraction_per_trade": 0.06,
+  "min_ai_confidence": 0.7,
+  "max_concurrent": 3,
+  "max_trade_notional_usd": 50,
+  "max_daily_loss_usd": -20,
+  "cooldown_min": 60
+}
