@@ -351,6 +351,44 @@ def _closed_trades_payload(limit: int = 20) -> List[Dict[str, Any]]:
                 "executed": bool(e.get("executed")),
                 "detail": e.get("detail"),
             })
+        elif ev == "ai_close":
+            # AI CLOSE verdict — same realized-PnL shape as dsl_exit when the
+            # close filled; degrades gracefully for an old/noop event that
+            # carries no PnL fields (shows the close but with 0% estimated).
+            coin = e.get("coin", "?")
+            side = e.get("side") or _find_open_side(coin, i) or "?"
+            has_explicit_lev = e.get("leverage") is not None
+            leverage = int(e["leverage"]) if has_explicit_lev else _estimate_leverage(coin)
+            if e.get("realized_pnl_pct") is not None:
+                spot_pct = float(e.get("realized_spot_pct") or 0)
+                net_pnl_pct = float(e["realized_pnl_pct"])
+                gross_pnl_pct = spot_pct * leverage
+                fees_pct = float(e.get("fees_pct") or (HL_TAKER_FEE_PCT * HL_ROUND_TRIP_FILLS * leverage))
+                pnl_source = "fill"
+            else:
+                spot_pct = 0.0
+                gross_pnl_pct = 0.0
+                fees_pct = 0.0
+                net_pnl_pct = 0.0
+                pnl_source = "estimated"
+            out.append({
+                "ts": e.get("ts"),
+                "coin": coin,
+                "source": "ai",
+                "side": side,
+                "leverage": leverage,
+                "leverage_estimated": not has_explicit_lev,
+                "reason": e.get("reason") or "AI close",
+                "pnl_pct": net_pnl_pct,
+                "pnl_pct_gross": gross_pnl_pct,
+                "pnl_source": pnl_source,
+                "fees_pct": fees_pct,
+                "spot_pct": spot_pct,
+                "fill_px": e.get("fill_px"),
+                "entry_px": e.get("entry_px"),
+                "executed": bool(e.get("executed")),
+                "detail": e.get("detail"),
+            })
         elif ev == "close_position":
             coin = e.get("coin", "?")
             out.append({
@@ -362,6 +400,9 @@ def _closed_trades_payload(limit: int = 20) -> List[Dict[str, Any]]:
                 "leverage_estimated": True,
                 "reason": "manual_close",
                 "pnl_pct": 0.0,
+                "pnl_pct_gross": 0.0,
+                "pnl_source": "estimated",
+                "fees_pct": 0.0,
                 "spot_pct": 0.0,
                 "executed": bool(e.get("ok")),
                 "detail": None,
@@ -1157,6 +1198,7 @@ async function refreshCloses() {
       const levMark = c.leverage_estimated ? '~' : '';
       const levTag = c.leverage > 1 ? `<span class="text-zinc-500 text-[10px]" title="${c.leverage_estimated ? 'leverage estimated from HL per-coin max — not recorded for this old trade' : ''}">${levMark}${c.leverage}x</span>` : '';
       const sourceTag = c.source === 'dsl' ? '<span class="text-amber-400 text-[10px]">dsl</span>'
+                      : c.source === 'ai' ? '<span class="text-sky-400 text-[10px]">ai</span>'
                                            : '<span class="text-zinc-500 text-[10px]">manual</span>';
       const failedTag = c.executed ? '' : ' <span class="text-red-400 text-[10px]">FAILED</span>';
       const pnlExactMark = c.pnl_source === 'fill' ? '' : '~';
@@ -1176,7 +1218,8 @@ async function refreshCloses() {
         <div class="col-span-1 text-zinc-500 text-right">${ageStr}</div>
       </div>`;
     }).join('');
-    const dslOnly = cs.filter(c => c.source === 'dsl');
+    // Realized closes only (dsl + ai) — manual closes carry no PnL.
+    const dslOnly = cs.filter(c => c.source === 'dsl' || c.source === 'ai');
     const wins = dslOnly.filter(c => c.pnl_pct > 0).length;
     const total = dslOnly.length;
     if (total > 0) {

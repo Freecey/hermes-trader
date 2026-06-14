@@ -505,12 +505,28 @@ while True:
                                "counter_regime": mr.get("counter_trend") or mr.get("against_funding")})
                 elif action == "close":
                     logger.info(f"Closed {coin} per AI CLOSE verdict: {result}")
-                    log_event({"event": "ai_close", "coin": coin,
-                               "executed": bool(result.get("ok")),
-                               "detail": result.get("order_id")
-                               or result.get("noop")
-                               or result.get("error"),
-                               "reasoning": (analysis.get("reasoning") or "")})
+                    ai_close_evt = {"event": "ai_close", "coin": coin,
+                                    "executed": bool(result.get("ok")),
+                                    "detail": result.get("order_id")
+                                    or result.get("noop")
+                                    or result.get("error"),
+                                    "reasoning": (analysis.get("reasoning") or "")}
+                    # Carry realized PnL + side/leverage so the dashboard's
+                    # recent-closes panel can render an AI close like a dsl_exit.
+                    # close_position_market returns these on a real fill; without
+                    # them the close was invisible in "recent closes".
+                    if result.get("realized_pnl_pct") is not None:
+                        ai_close_evt.update({
+                            "side": result.get("side"),
+                            "leverage": result.get("leverage"),
+                            "entry_px": result.get("entry_px"),
+                            "fill_px": result.get("fill_px"),
+                            "realized_pnl_pct": result.get("realized_pnl_pct"),
+                            "realized_spot_pct": result.get("spot_pct"),
+                            "fees_pct": result.get("fees_pct"),
+                            "reason": "AI CLOSE verdict",
+                        })
+                    log_event(ai_close_evt)
                 elif action == "unknown":
                     log_event({"event": "error", "coin": coin,
                                "error": f"unhandled verdict {routed['verdict']!r}"})
